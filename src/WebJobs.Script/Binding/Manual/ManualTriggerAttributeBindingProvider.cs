@@ -92,7 +92,7 @@ namespace Microsoft.Azure.WebJobs.Script.Binding
                 string invokeString = value?.ToString();
                 if (_isUserTypeBinding)
                 {
-                    if (value != null && value.GetType() != _parameter.ParameterType)
+                    if (value != null && !_parameter.ParameterType.IsAssignableFrom(value.GetType()))
                     {
                         if (value is string)
                         {

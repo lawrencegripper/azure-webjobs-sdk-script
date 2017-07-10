@@ -804,6 +804,38 @@ namespace Microsoft.Azure.WebJobs.Script
                 functionMetadata.IsExcluded = (bool)value;
             }
 
+            JArray filterArray = (JArray)configMetadata["filters"];
+            if (filterArray != null)
+            {
+                foreach (JToken filter in filterArray)
+                {
+                    if (filter.Type == JTokenType.Object)
+                    {
+                        // pull the executing/executed function names from
+                        // the object
+                        JObject filterObject = (JObject)filter;
+                        JToken executingFunctionName, executedFunctionName;
+                        filterObject.TryGetValue("executing", out executingFunctionName);
+                        filterObject.TryGetValue("executed", out executedFunctionName);
+                        functionMetadata.Filters.Add(new InvocationFilter
+                        {
+                            ExecutingFilter = (string)executingFunctionName,
+                            ExecutedFilter = (string)executedFunctionName
+                        });
+                    }
+                    else if (filter.Type == JTokenType.String)
+                    {
+                        // when the value is just a string, we use the same method
+                        // for both executing and executed
+                        functionMetadata.Filters.Add(new InvocationFilter
+                        {
+                            ExecutingFilter = (string)filter,
+                            ExecutedFilter = (string)filter
+                        });
+                    }
+                }
+            }
+
             return functionMetadata;
         }
 
