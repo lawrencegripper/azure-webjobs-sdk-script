@@ -486,6 +486,9 @@ namespace Microsoft.Azure.WebJobs.Script
                     }
                 }
                 LoadBuiltinBindings(usedBindingTypes);
+
+                VerifyPrecompiled(functionMetadata);
+
                 LoadCustomExtensions();
 
                 // Do this after we've loaded the custom extensions. That gives an extension an opportunity to plug in their own implementations.
@@ -514,6 +517,8 @@ namespace Microsoft.Azure.WebJobs.Script
                 Type type = FunctionGenerator.Generate(HostAssemblyName, typeName, typeAttributes, functions);
                 List<Type> types = new List<Type>();
                 types.Add(type);
+
+                AddDirectTypes(types, functions);
 
                 hostConfig.TypeLocator = new TypeLocator(types);
 
@@ -563,6 +568,73 @@ namespace Microsoft.Azure.WebJobs.Script
             return bindingTypes;
         }
 
+        // Validate that for any precompiled assembly, all functions have the same configuration precedence.
+        // Also load any extensions from the precompiled directory.
+        private void VerifyPrecompiled(Collection<FunctionMetadata> functions)
+        {
+            HashSet<string> extensionFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, bool> mapAssemblySettings = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (var function in functions)
+            {
+                var scriptFile = function.ScriptFile;
+                if (scriptFile.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    bool isDirect = function.IsDirect;
+                    bool prevIsDirect;
+                    if (mapAssemblySettings.TryGetValue(scriptFile, out prevIsDirect))
+                    {
+                        if (prevIsDirect != isDirect)
+                        {
+                            // Error. All entries pointing to the same dll must have the same value for IsDirect
+                            string msg = string.Format(CultureInfo.InvariantCulture, "Configuration error: All functions in {0} must have the same config precedence,",
+                                scriptFile);
+                            TraceWriter.Info(msg);
+                            _startupLogger?.LogInformation(msg);
+
+                            // Hard failure
+                            functions.Clear();
+                            return;
+                        }
+                    }
+                    mapAssemblySettings[scriptFile] = isDirect;
+
+                    string path = Path.GetDirectoryName(scriptFile);
+                    extensionFolders.Add(path);
+                }
+            }
+
+            // For any direct loaded assemblies, check for extensions.
+            foreach (var path in extensionFolders)
+            {
+                LoadCustomExtensions(path);
+            }
+        }
+
+        private static void AddDirectTypes(List<Type> types, Collection<FunctionDescriptor> functions)
+        {
+            HashSet<Type> visitedTypes = new HashSet<Type>();
+
+            foreach (var function in functions)
+            {
+                var metadata = function.Metadata;
+                if (!metadata.IsDirect)
+                {
+                    continue;
+                }
+
+                string path = metadata.ScriptFile;
+                var typeName = Utility.GetFullClassName(metadata.EntryPoint);
+
+                Assembly assembly = Assembly.LoadFrom(path);
+                var type = assembly.GetType(typeName);
+
+                if (visitedTypes.Add(type))
+                {
+                    types.Add(type);
+                }
+            }
+        }
+
         private IMetricsLogger CreateMetricsLogger()
         {
             IMetricsLogger metricsLogger = ScriptConfig.HostConfig.GetService<IMetricsLogger>();
@@ -581,30 +653,7 @@ namespace Microsoft.Azure.WebJobs.Script
             {
                 foreach (var dir in Directory.EnumerateDirectories(extensionsPath))
                 {
-                    foreach (var path in Directory.EnumerateFiles(dir, "*.dll"))
-                    {
-                        // We don't want to load and reflect over every dll.
-                        // By convention, restrict to based on filenames.
-                        var filename = Path.GetFileName(path);
-                        if (!filename.ToLowerInvariant().Contains("extension"))
-                        {
-                            continue;
-                        }
-
-                        try
-                        {
-                            // See GetNugetPackagesPath() for details
-                            // Script runtime is already setup with assembly resolution hooks, so use LoadFrom
-                            Assembly assembly = Assembly.LoadFrom(path);
-                            LoadExtensions(assembly, path);
-                        }
-                        catch (Exception e)
-                        {
-                            string msg = $"Failed to load custom extension from '{path}'.";
-                            TraceWriter.Error(msg, e);
-                            _startupLogger.LogError(0, e, msg);
-                        }
-                    }
+                    LoadCustomExtensions(dir);
                 }
             }
 
@@ -614,6 +663,62 @@ namespace Microsoft.Azure.WebJobs.Script
             var generalProvider = ScriptConfig.BindingProviders.OfType<GeneralScriptBindingProvider>().First();
             var metadataProvider = this.CreateMetadataProvider();
             generalProvider.CompleteInitialization(metadataProvider);
+        }
+
+        private void LoadCustomExtensions(string extensionsPath)
+        {
+            var existing = AppDomain.CurrentDomain.GetAssemblies();
+
+            foreach (var path in Directory.EnumerateFiles(extensionsPath, "*.dll"))
+            {
+                // We don't want to load and reflect over every dll.
+                // By convention, restrict to based on filenames.
+                var filename = Path.GetFileName(path);
+                if (!filename.ToLowerInvariant().Contains("extension"))
+                {
+                    continue;
+                }
+
+                // Skip if we've already loaded it.  Or if it's a builtin.
+                if (IsExtensionAlreadyLoaded(existing, path))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    // See GetNugetPackagesPath() for details
+                    // Script runtime is already setup with assembly resolution hooks, so use LoadFrom
+                    Assembly assembly = Assembly.LoadFrom(path);
+                    LoadExtensions(assembly, path);
+                }
+                catch (Exception e)
+                {
+                    string msg = $"Failed to load custom extension from '{path}'.";
+                    TraceWriter.Error(msg, e);
+                    _startupLogger.LogError(0, e, msg);
+                }
+            }
+        }
+
+        // Return true if the assembly is already loaded.
+        private static bool IsExtensionAlreadyLoaded(Assembly[] existing, string path)
+        {
+            var x = Path.GetFileName(path);
+
+            foreach (var asm in existing)
+            {
+                if (!asm.IsDynamic)
+                {
+                    var codebase = asm.CodeBase;
+                    var y = Path.GetFileName(codebase);
+                    if (string.Equals(x, y, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private void LoadExtensions(Assembly assembly, string locationHint)
@@ -1032,6 +1137,23 @@ namespace Microsoft.Azure.WebJobs.Script
 
             // determine the script type based on the primary script file extension
             functionMetadata.ScriptType = ParseScriptType(functionMetadata.ScriptFile);
+
+            JToken isDirect;
+            if (functionConfig.TryGetValue("configurationSource", StringComparison.OrdinalIgnoreCase, out isDirect))
+            {
+                var value = isDirect.ToString().ToLowerInvariant();
+                if (value == "attributes")
+                {
+                    functionMetadata.IsDirect = true;
+                }
+                else if (value == "config")
+                {
+                }
+                else
+                {
+                    error = $"Illegal value '{value}' for 'configurationSource' property in {functionMetadata.Name}'.";
+                }
+            }
 
             functionMetadata.EntryPoint = (string)functionConfig["entryPoint"];
 
