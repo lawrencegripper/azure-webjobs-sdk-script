@@ -7,7 +7,10 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Pipes;
 using System.Linq;
+using System.Security.Principal;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Script.Binding;
 
@@ -63,7 +66,86 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                     string bashPath = ResolveBashPath();
                     await ExecuteScriptAsync(bashPath, scriptHostArguments, parameters, context);
                     break;
+                case ScriptType.NodesStandalone:
+                    scriptHostArguments = string.Format("\"{0}\"", _scriptFilePath);
+                    await ExecuteScriptAsync("node.exe", scriptHostArguments, parameters, context);
+                    break;
             }
+        }
+
+        internal async Task ExecuteScriptWithPipeAsync(string path, string arguments, object[] invocationParameters, FunctionInvocationContext context)
+        {
+            string workingDirectory = Path.GetDirectoryName(_scriptFilePath);
+            Dictionary<string, string> environmentVariables = new Dictionary<string, string>();
+            SetExecutionContextVariables(context.ExecutionContext, environmentVariables);
+
+            var invocationId = context.ExecutionContext.InvocationId;
+
+            object input = invocationParameters[0];
+            if (!(input is Stream))
+            {
+                throw new NotImplementedException("Expected upload stream");
+            }
+
+            var cancelPipeServer = new CancellationTokenSource();
+            var pipeServer = StartPipeServer(invocationId.ToString(), input as Stream, cancelPipeServer.Token);
+
+            Process process = CreateProcess(path, workingDirectory, arguments, environmentVariables);
+            var userTraceWriter = CreateUserTraceWriter(context.TraceWriter);
+            process.OutputDataReceived += (s, e) =>
+            {
+                if (e.Data != null)
+                {
+                    // the user's TraceWriter will automatically log to ILogger as well
+                    userTraceWriter.Info(e.Data);
+                }
+            };
+
+            var tcs = new TaskCompletionSource<object>();
+            process.Exited += (sender, args) =>
+            {
+                tcs.TrySetResult(null);
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+
+            await tcs.Task;
+
+            cancelPipeServer.Cancel();
+            await pipeServer;
+        }
+
+        internal static Task StartPipeServer(string instanceId, Stream data, CancellationToken token)
+        {
+            Trace.WriteLine("Setting up named pipe");
+
+            NamedPipeClientStream pipeClient =
+                new NamedPipeClientStream(".", "\\.\\" + instanceId,
+                    PipeDirection.InOut, PipeOptions.None, TokenImpersonationLevel.Anonymous);
+
+            Trace.WriteLine("Waiting for connection...\n");
+            pipeClient.Connect();
+            Trace.WriteLine("Connected...\n");
+
+            int chunkSize = 255;
+
+            return Task.Run(() =>
+            {
+                using (StreamReader sr = new StreamReader(data))
+                using (StreamWriter sw = new StreamWriter(pipeClient))
+                {
+                    while (!sr.EndOfStream && pipeClient.IsConnected && !token.IsCancellationRequested)
+                    {
+                        var chunk = new char[255];
+                        sr.ReadBlock(chunk, 0, chunkSize);
+
+                        sw.Write(chunk);
+                        Trace.WriteLine(DateTime.Now.ToString() + "Write chuck...\n");
+                        pipeClient.WaitForPipeDrain();
+                    }
+                }
+            });
         }
 
         internal async Task ExecuteScriptAsync(string path, string arguments, object[] invocationParameters, FunctionInvocationContext context)

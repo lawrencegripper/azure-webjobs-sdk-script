@@ -420,6 +420,12 @@
     <Compile Include="Controllers\Keys\PostHostFunctionKeyScenario.cs" />
     <Compile Include="Controllers\Keys\PutHostFunctionKeyScenario.cs" />
     <Compile Include="CSharpEndToEndTests.cs" />
+    <Compile Include="Properties\Settings.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+      <DependentUpon>Settings.settings</DependentUpon>
+    </Compile>
+    <Compile Include="NodeStandaloneEndToEndTests.cs" />
     <Compile Include="RawAssemblyEndToEndTests.cs" />
     <Compile Include="EndToEndTestFixture.cs" />
     <Compile Include="EndToEndTestsBase.cs" />
@@ -574,6 +580,10 @@
       <Link>stylecop.json</Link>
     </AdditionalFiles>
     <None Include="packages.config" />
+    <None Include="Properties\Settings.settings">
+      <Generator>SettingsSingleFileGenerator</Generator>
+      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
+    </None>
     <None Include="TestScripts\CSharp\FunctionExecutionContext\function.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
