@@ -66,9 +66,9 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                     string bashPath = ResolveBashPath();
                     await ExecuteScriptAsync(bashPath, scriptHostArguments, parameters, context);
                     break;
-                case ScriptType.NodesStandalone:
+                case ScriptType.NodeStandalone:
                     scriptHostArguments = string.Format("\"{0}\"", _scriptFilePath);
-                    await ExecuteScriptAsync("node.exe", scriptHostArguments, parameters, context);
+                    await ExecuteScriptWithPipeAsync("node.exe", scriptHostArguments, parameters, context);
                     break;
             }
         }
@@ -145,7 +145,7 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                         pipeClient.WaitForPipeDrain();
                     }
                 }
-            });
+            }, token);
         }
 
         internal async Task ExecuteScriptAsync(string path, string arguments, object[] invocationParameters, FunctionInvocationContext context)
